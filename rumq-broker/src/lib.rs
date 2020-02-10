@@ -7,7 +7,7 @@ use derive_more::From;
 use futures_util::future::join_all;
 use tokio_util::codec::Framed;
 use tokio::net::TcpListener;
-use tokio::sync::mpsc::{channel, Sender, Receiver};
+use tokio::sync::mpsc::{channel, Sender};
 use tokio::task;
 use tokio::time::{self, Elapsed};
 use tokio_rustls::rustls::internal::pemfile::{certs, rsa_private_keys};
@@ -22,7 +22,8 @@ use std::io::{self, BufReader};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
-use std::thread;
+use std::rc::Rc;
+use std::cell::RefCell;
 
 mod connection;
 mod httppush;
@@ -107,7 +108,7 @@ async fn tls_connection<P: AsRef<Path>>(ca_path: Option<P>, cert_path: P, key_pa
     Ok(acceptor)
 }
 
-pub async fn accept_loop(config: Arc<ServerSettings>, router_tx: Sender<(String, router::RouterMessage)>) -> Result<(), Error> {
+pub async fn accept_loop(config: Arc<ServerSettings>, router: Rc<RefCell<router::Router>>, router_tx: Sender<(String, router::RouterMessage)>) -> Result<(), Error> {
     let addr = format!("0.0.0.0:{}", config.port);
     let connection_config = config.clone();
 
@@ -122,6 +123,7 @@ pub async fn accept_loop(config: Arc<ServerSettings>, router_tx: Sender<(String,
     // eventloop which accepts connections
     let mut listener = TcpListener::bind(addr).await?;
     loop {
+        let router = router.clone();
         let (stream, addr) = match listener.accept().await {
             Ok(s) => s,
             Err(e) => {
@@ -145,19 +147,15 @@ pub async fn accept_loop(config: Arc<ServerSettings>, router_tx: Sender<(String,
             };
 
             let framed = Framed::new(stream, codec::MqttCodec::new());
-            task::spawn( async {
-                match connection::eventloop(config, framed, router_tx).await {
-                    Ok(id) => info!("Connection eventloop done!!. Id = {:?}", id),
-                    Err(e) => error!("Connection eventloop error = {:?}", e),
-                }
+            task::spawn_local( async {
+                let out = connection::eventloop(config, router, framed, router_tx).await;
+                info!("Connection eventloop done!! Result = {:?}", out);
             });
         } else {
             let framed = Framed::new(stream, codec::MqttCodec::new());
-            task::spawn( async {
-                match connection::eventloop(config, framed, router_tx).await {
-                    Ok(id) => info!("Connection eventloop done!!. Id = {:?}", id),
-                    Err(e) => error!("Connection eventloop error = {:?}", e),
-                }
+            task::spawn_local( async {
+                let out = connection::eventloop(config, router, framed, router_tx).await;
+                info!("Connection eventloop done!! Result = {:?}", out);
             });
         };
 
@@ -165,23 +163,13 @@ pub async fn accept_loop(config: Arc<ServerSettings>, router_tx: Sender<(String,
     }
 }
 
-#[tokio::main(core_threads = 1)]
-async fn router(rx: Receiver<(String, router::RouterMessage)>) {
-    let mut router = router::Router::new(rx);
-    if let Err(e) = router.start().await {
-        error!("Router stopped. Error = {:?}", e);
-    }
-}
 
 #[tokio::main(core_threads = 4)]
 pub async fn start(config: Config) {
     let (router_tx, router_rx) = channel(100);
 
-    // router to route data between connections. creates an extra copy but
-    // might not be a big deal if we prevent clones/send fat pointers and batch
-    thread::spawn(move || {
-        router(router_rx)
-    });
+    let router = router::Router::new(router_rx);
+    let router = Rc::new(RefCell::new(router));
 
     let http_router_tx = router_tx.clone();
     // TODO: Remove clone on main config
@@ -196,19 +184,25 @@ pub async fn start(config: Config) {
         error!("Http routine stopped. Result = {:?}", out);
     });
 
+    let local = task::LocalSet::new();
     let mut servers = Vec::new();
-    for server in config.servers.into_iter() {
-        let config = Arc::new(server);
+    local.run_until(async move {
+        for server in config.servers.into_iter() {
+            let config = Arc::new(server);
 
-        let fut = accept_loop(config, router_tx.clone());
-        let o = task::spawn(async {
-            error!("Accept loop returned = {:?}", fut.await);
-        });
+            let router_tx = router_tx.clone();
+            let router = router.clone();
+            let o = task::spawn_local(async move {
+                let out = accept_loop(config, router, router_tx).await;
+                error!("Accept loop returned = {:?}", out);
+            });
 
-        servers.push(o);
-    }
+            servers.push(o);
+        }
 
-    join_all(servers).await;
+        let o = join_all(servers).await;
+        error!("Bye bye.... Result = {:?}", o);
+    }).await;
 }
 
 

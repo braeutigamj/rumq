@@ -147,7 +147,7 @@ impl Router {
         }
     }
 
-    fn handle_incoming_router_message(&mut self, id: String, message: &mut RouterMessage) -> Result<Option<RouterMessage>, Error> {
+    pub fn handle_incoming_router_message(&mut self, id: String, message: &mut RouterMessage) -> Result<Option<RouterMessage>, Error> {
         debug!("Incoming router message. Id = {}, {:?}", id, message);
 
         match message {
@@ -168,7 +168,7 @@ impl Router {
         }
     }
 
-    fn route(&mut self, id: String, message: RouterMessage) -> Result<(), Error> {
+    pub fn route(&mut self, id: String, message: RouterMessage) -> Result<(), Error> {
         if let RouterMessage::Packet(packet) = message {
                 debug!("Routing router message. Id = {}, {:?}", id, packet);
                 match packet {
@@ -183,7 +183,7 @@ impl Router {
         Ok(())
     }
 
-    fn handle_connect(&mut self, connect: Connect, connection_handle: Sender<RouterMessage>) -> Result<Option<RouterMessage>, Error> {
+    pub fn handle_connect(&mut self, connect: Connect, connection_handle: Sender<RouterMessage>) -> Result<Option<RouterMessage>, Error> {
         let id = connect.client_id;
         let clean_session = connect.clean_session;
         let will = connect.last_will;

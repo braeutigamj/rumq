@@ -11,18 +11,21 @@ use tokio::select;
 use futures_util::sink::SinkExt;
 use futures_util::stream::Stream;
 
-use crate::router::{self, RouterMessage};
+use crate::router::{self, Router, RouterMessage};
 use crate::ServerSettings;
 use crate::Network;
 
 use std::sync::Arc;
 use std::time::Duration;
+use std::rc::Rc;
+use std::cell::RefCell;
 use std::io;
 
 #[derive(Debug, From)]
 pub enum Error {
     Io(io::Error),
     Core(rumq_core::Error),
+    Router(router::Error),
     Timeout(Elapsed),
     KeepAlive,
     Send(SendError<(String, RouterMessage)>),
@@ -34,8 +37,8 @@ pub enum Error {
     StreamDone
 }
 
-pub async fn eventloop<S: Network>(config: Arc<ServerSettings>, stream: S, mut router_tx: Sender<(String, RouterMessage)>) -> Result<String, Error> {
-    let mut connection = Connection::new(config, stream, router_tx.clone()).await?;
+pub async fn eventloop<S: Network>(config: Arc<ServerSettings>, router: Rc<RefCell<Router>>, stream: S, mut router_tx: Sender<(String, RouterMessage)>) -> Result<String, Error> {
+    let mut connection = Connection::new(config, router, stream, router_tx.clone()).await?;
     let id = connection.id.clone();
 
     if let Err(err) = connection.run().await {
@@ -51,11 +54,12 @@ pub struct Connection<S> {
     keep_alive: Duration,
     stream:     S,
     this_rx:    Receiver<RouterMessage>,
+    router: Rc<RefCell<Router>>,
     router_tx:  Sender<(String, RouterMessage)>,
 }
 
 impl<S: Network> Connection<S> {
-    async fn new(config: Arc<ServerSettings>, mut stream: S, mut router_tx: Sender<(String, RouterMessage)>) -> Result<Connection<S>, Error> {
+    async fn new(config: Arc<ServerSettings>, router: Rc<RefCell<Router>>, mut stream: S, router_tx: Sender<(String, RouterMessage)>) -> Result<Connection<S>, Error> {
         let (this_tx, this_rx) = channel(100);
         let timeout = Duration::from_millis(config.connection_timeout_ms.into());
         let connect = time::timeout(timeout, async {
@@ -69,47 +73,35 @@ impl<S: Network> Connection<S> {
         let id = connect.client_id.clone();
         let keep_alive = Duration::from_secs(connect.keep_alive as u64);
 
-        // construct connect router message with cliend id and handle to this connection
-        let routermessage = RouterMessage::Connect(router::Connection::new(connect, this_tx));
-        router_tx.send((id.clone(), routermessage)).await?;
-        let connection = Connection { id, keep_alive, stream, this_rx, router_tx };
-        Ok(connection)
-    }
-
-
-    async fn run(&mut self) -> Result<(), Error> {
-        let keep_alive = self.keep_alive + self.keep_alive.mul_f32(0.5);
-        let id = self.id.clone();
-
-        let message = match self.this_rx.next().await {
-            Some(m) => m,
-            None => {
-                info!("Tx closed!! Stopping the connection");
-                return Ok(()) 
-            }
-        };
-
+        let message = router.borrow_mut().handle_connect(connect, this_tx)?;
         let mut pending = match message {
-            RouterMessage::Pending(connack) => connack,
-            _ => return Err(Error::NotConnack)
+            Some(RouterMessage::Pending(packets)) => packets,
+            _ => unimplemented!()
         };
 
         // eventloop which pending packets from the last session 
         if pending.len() > 0 {
             let connack = connack(ConnectReturnCode::Accepted, true);
             let packet = Packet::Connack(connack);
-            let keep_alive = self.keep_alive + self.keep_alive.mul_f32(0.5);
+            let keep_alive = keep_alive + keep_alive.mul_f32(0.5);
 
-            self.stream.send(packet).await?;
+            stream.send(packet).await?;
 
             let mut pending = iter(pending.drain(..)).map(|publish| RouterMessage::Packet(Packet::Publish(publish)));
-            let mut incoming = time::throttle(Duration::from_millis(100), &mut self.stream);
+            let mut incoming = time::throttle(Duration::from_millis(100), &mut stream);
             let mut timeout = time::delay_for(keep_alive);
 
             loop {
                 let (done, routermessage) = select(&mut incoming, &mut pending, keep_alive, &mut timeout).await?;
-                if let Some(message) = routermessage {
-                    self.router_tx.send((id.clone(), message)).await?;
+                if let Some(mut message) = routermessage {
+                    match router.borrow_mut().handle_incoming_router_message(id.clone(), &mut message) {
+                        Ok(Some(RouterMessage::Packet(packet))) => incoming.get_mut().send(packet).await?,
+                        Ok(_) => (),
+                        Err(e) => {
+                            error!("Incoming handle error = {:?}", e);
+                            continue;
+                        }
+                    }
                 }
 
                 if done {
@@ -119,8 +111,17 @@ impl<S: Network> Connection<S> {
         } else {
             let connack = connack(ConnectReturnCode::Accepted, false);
             let packet = Packet::Connack(connack);
-            self.stream.send(packet).await?;
+            stream.send(packet).await?;
         }
+
+        let connection = Connection { id, keep_alive, stream, this_rx, router, router_tx };
+        Ok(connection)
+    }
+
+
+    async fn run(&mut self) -> Result<(), Error> {
+        let keep_alive = self.keep_alive + self.keep_alive.mul_f32(0.5);
+        let id = self.id.clone();
 
         // eventloop which processes packets and router messages
         let mut incoming = &mut self.stream;
@@ -128,8 +129,17 @@ impl<S: Network> Connection<S> {
         loop {
             let mut timeout = time::delay_for(keep_alive);
             let (done, routermessage) = select(&mut incoming, &mut self.this_rx, keep_alive, &mut timeout).await?; 
-            if let Some(message) = routermessage {
-                self.router_tx.send((id.clone(), message)).await?;
+            if let Some(mut message) = routermessage {
+                match self.router.borrow_mut().handle_incoming_router_message(id.clone(), &mut message) {
+                    Ok(Some(RouterMessage::Packet(packet))) => incoming.get_mut().send(packet).await?,
+                    Ok(_) => (),
+                    Err(e) => {
+                        error!("Incoming handle error = {:?}", e);
+                        continue;
+                    }
+                }
+            
+                let _ = self.router.borrow_mut().route(id.clone(), message);
             }
 
             if done {
