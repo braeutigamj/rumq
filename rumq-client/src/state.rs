@@ -48,8 +48,8 @@ pub struct MqttState {
     pub outgoing_pub: VecDeque<Publish>,
     /// Packet ids of released QoS 2 publishes
     pub outgoing_rel: VecDeque<PacketIdentifier>,
-    /// Packet ids on incoming QoS 2 publishes
-    pub incoming_pub: VecDeque<PacketIdentifier>,
+    /// Publishes on incoming QoS 2 publishes
+    pub incoming_pub: VecDeque<Publish>,
 }
 
 impl MqttState {
@@ -214,20 +214,19 @@ impl MqttState {
             QoS::ExactlyOnce => {
                 let pkid = publish.pkid.unwrap();
                 let reply = Packet::Pubrec(pkid);
-                let notification = Notification::Publish(publish);
 
-                self.incoming_pub.push_back(pkid);
-                Ok((Some(notification), Some(reply)))
+                self.incoming_pub.push_back(publish);
+                Ok((None, Some(reply)))
             }
         }
     }
 
     fn handle_incoming_pubrel(&mut self, pkid: PacketIdentifier) -> Result<(Option<Notification>, Option<Packet>), StateError> {
-        match self.incoming_pub.iter().position(|x| *x == pkid) {
+        match self.incoming_pub.iter().position(|x| x.pkid == Some(pkid)) {
             Some(index) => {
-                let _ = self.incoming_pub.remove(index);
+                let publish = self.incoming_pub.remove(index).unwrap();
                 let reply = Packet::Pubcomp(pkid);
-                Ok((None, Some(reply)))
+                Ok((Some(Notification::Publish(publish)), Some(reply)))
             }
             None => {
                 error!("Unsolicited pubrel packet: {:?}", pkid);

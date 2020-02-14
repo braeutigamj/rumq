@@ -8,11 +8,13 @@ use std::time::Duration;
 pub(crate) mod eventloop;
 pub(crate) mod network;
 pub(crate) mod state;
+pub(crate) mod state_persistence;
 
 pub use eventloop::eventloop;
 pub use eventloop::{EventLoopError, MqttEventLoop};
 pub use rumq_core::*;
 pub use state::MqttState;
+pub use state_persistence::{ NoStatePersistence, FileSystemStatePersistence };
 
 /// Incoming notifications from the broker
 #[derive(Debug)]

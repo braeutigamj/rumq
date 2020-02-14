@@ -9,6 +9,7 @@ use tokio::stream::iter;
 use async_stream::stream;
 use crate::state::{StateError, MqttState};
 use crate::MqttOptions;
+use crate::state_persistence::{ StatePersistence };
 
 use std::time::Duration;
 use std::collections::VecDeque;
@@ -23,7 +24,8 @@ pub struct MqttEventLoop {
     state: MqttState,
     requests: Box<dyn Requests>,
     pending_pub: VecDeque<Publish>,
-    pending_rel: VecDeque<PacketIdentifier>
+    pending_rel: VecDeque<PacketIdentifier>,
+    persistence: Box<dyn StatePersistence>,
 }
 
 
@@ -70,13 +72,17 @@ pub enum EventLoopError {
 /// For example, state and requests can be used to save state to disk before shutdown.
 /// Options can be used to update gcp iotcore password
 /// TODO: Remove `mqttoptions` from `state` to make sure that there is not chance of dirty opts
-pub fn eventloop(options: MqttOptions, requests: impl Requests + 'static) -> MqttEventLoop {
-    let state = MqttState::new();
+pub async fn eventloop(options: MqttOptions,
+                       requests: impl Requests + 'static,
+                       mut persistence: Box<dyn StatePersistence>) ->
+    MqttEventLoop
+{
+    let state = persistence.load().await;
     let requests = Box::new(requests);
     let pending_pub = VecDeque::new();
     let pending_rel = VecDeque::new();
 
-    let eventloop = MqttEventLoop { options, state, requests, pending_pub, pending_rel };
+    let eventloop = MqttEventLoop { options, state, requests, pending_pub, pending_rel, persistence };
     eventloop
 }
 
@@ -132,6 +138,14 @@ impl MqttEventLoop {
                     }
                 };
 
+                // yield the notification to the user
+                if let Some(n) = notification {yield n}
+
+                self.persistence
+                    .save(&self.state)
+                    .await
+                    .expect("could not save state.");
+
                 // write the reply back to the network
                 if let Some(p) = outpacket {
                     if let Err(e) = network_tx.mqtt_write(&p).await {
@@ -139,9 +153,6 @@ impl MqttEventLoop {
                         break
                     }
                 }
-
-                // yield the notification to the user 
-                if let Some(n) = notification { yield n }
             }
         };
 
