@@ -105,6 +105,7 @@ impl MqttState {
             Packet::Publish(publish) => self.handle_outgoing_publish(publish)?,
             Packet::Subscribe(subscribe) => self.handle_outgoing_subscribe(subscribe)?,
             Packet::Pingreq => self.handle_outgoing_ping()?,
+            Packet::Disconnect => self.handle_outgoing_disconnect()?,
             _ => unimplemented!(),
         };
 
@@ -292,6 +293,10 @@ impl MqttState {
     pub fn handle_outgoing_connect(&mut self) -> Result<(), StateError> {
         self.connection_status = MqttConnectionStatus::Handshake;
         Ok(())
+    }
+
+    pub fn handle_outgoing_disconnect(&mut self) -> Result<Packet, StateError> {
+        Ok(Packet::Disconnect)
     }
 
     pub fn handle_incoming_connack(&mut self, packet: Packet) -> Result<(), StateError> {
