@@ -230,8 +230,10 @@ impl MqttState {
                 Ok((Some(Notification::Publish(publish)), Some(reply)))
             }
             None => {
-                error!("Unsolicited pubrel packet: {:?}", pkid);
-                Err(StateError::Unsolicited)
+                let error_msg = format!("Unsolicited pubrel packet: {:?}", pkid);
+                error!("{}", error_msg);
+                let reply = Packet::Pubcomp(pkid);
+                Ok((Some(Notification::Error(error_msg)), Some(reply)))
             }
         }
     }

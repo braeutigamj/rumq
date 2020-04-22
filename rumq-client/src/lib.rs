@@ -28,6 +28,7 @@ pub enum Notification {
     Pubcomp(PacketIdentifier),
     Suback(PacketIdentifier),
     StreamEnd(EventLoopError),
+    Error(String),
 }
 
 #[doc(hidden)]
