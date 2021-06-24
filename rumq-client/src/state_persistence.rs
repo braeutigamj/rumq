@@ -51,10 +51,20 @@ impl StatePersistence for FileSystemStatePersistence {
     async fn load(&mut self) -> MqttState {
         let content = fs::read(&self.filename).await;
 
+        let handle_deserialize_error = |_| -> StateData {
+            error!("[ALERT] Could not parse saved state. Created new state.");
+            StateData {
+                last_pkid: PacketIdentifierData(0),
+                outgoing_pub: vec![],
+                outgoing_rel: vec![],
+                incoming_pub: vec![],
+            }
+        };
+
         let data: StateData = match content {
             Ok(bytes) => (bincode
                           ::deserialize(&bytes)
-                          .expect("could not parse saved state")),
+                          .unwrap_or_else(handle_deserialize_error)),
             _ => StateData {
                 last_pkid: PacketIdentifierData(0),
                 outgoing_pub: vec![],
